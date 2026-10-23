@@ -4,12 +4,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
-from ui.render import csv_comercial, csv_logistica, render
-from ui.store import Store
+from ui.render import csv_comercial, csv_logistica, page_login, render
+from ui.store import Store, clave_ok, hash_clave
 
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
-SESSIONS = {}
+SESSIONS = {}  # shortcut: no revalida usuario ni rol, hasta el próximo login
 HOME = {
     "ROL_OPERADOR_CD": "/cd/catalogo",
     "ROL_ENCARGADO_LOCAL": "/local/stock",
@@ -20,6 +20,42 @@ ZONA = (
     ("/local", "ROL_ENCARGADO_LOCAL"),
     ("/gerencia", "ROL_ADMIN_GERENCIAL"),
 )
+USUARIOS = [
+    {"usuario": "cd", "clave": hash_clave("cd"), "rol": "ROL_OPERADOR_CD"},
+    {"usuario": "local", "clave": hash_clave("local"), "rol": "ROL_ENCARGADO_LOCAL"},
+    {"usuario": "gerencia", "clave": hash_clave("gerencia"), "rol": "ROL_ADMIN_GERENCIAL"},
+]
+
+
+def buscar_usuario(nombre):
+    for usuario in USUARIOS:
+        if usuario["usuario"] == nombre:
+            return usuario
+    return None
+
+
+def alta_usuario(nombre, clave, rol):
+    nombre = nombre.strip()
+    if not nombre or not clave:
+        return "Usuario y contraseña son obligatorios."
+    if any(c.isspace() for c in nombre):
+        return "El usuario no puede tener espacios."
+    if rol not in HOME:
+        return "Rol inválido."
+    if buscar_usuario(nombre):
+        return "Ese usuario ya existe."
+    USUARIOS.append({"usuario": nombre, "clave": hash_clave(clave), "rol": rol})
+    return None
+
+
+def baja_usuario(nombre, actual):
+    if nombre == actual:
+        return "No podés borrar el usuario de esta sesión."
+    for i, usuario in enumerate(USUARIOS):
+        if usuario["usuario"] == nombre:
+            del USUARIOS[i]
+            return None
+    return "Usuario no encontrado."
 
 
 def zona_de(path):
@@ -36,26 +72,32 @@ def unicos(form):
 
 
 class Handler(BaseHTTPRequestHandler):
-    def sesion(self):
-        sid = ""
+    def sid_cookie(self):
         raw = self.headers.get("Cookie", "")
         for parte in raw.split(";"):
             nombre, _, valor = parte.strip().partition("=")
-            if nombre == "sid":
-                sid = valor
-        if sid in SESSIONS:
-            return sid, SESSIONS[sid]
-        sid = f"{len(SESSIONS) + 1:x}{id(self):x}"
-        SESSIONS[sid] = {"rol": "ROL_OPERADOR_CD", "store": Store()}
-        return sid, SESSIONS[sid]
+            if nombre == "sid" and valor in SESSIONS:
+                return valor
+        return ""
 
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path.startswith("/static/"):
             self.archivo(parsed.path)
             return
-        sid, ses = self.sesion()
         q = {k: v[0] for k, v in parse_qs(parsed.query).items()}
+        sid = self.sid_cookie()
+        if parsed.path == "/login":
+            if sid:
+                self.redirect(HOME[SESSIONS[sid]["rol"]], sid)
+                return
+            msg = "Usuario o contraseña incorrectos." if q.get("e") else ""
+            self.texto(page_login(msg), "text/html; charset=utf-8")
+            return
+        if not sid:
+            self.redirect("/login", "")
+            return
+        ses = SESSIONS[sid]
         rol_ruta = zona_de(parsed.path.removesuffix(".csv"))
         if parsed.path in ("/", ""):
             self.redirect(HOME[ses["rol"]], sid)
@@ -75,7 +117,7 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/gerencia/logistica.csv":
             self.texto(csv_logistica(store, q), "text/csv; charset=utf-8", sid)
             return
-        html = render(ses["rol"], store, parsed.path, q)
+        html = render(ses["rol"], store, parsed.path, q, ses["usuario"], USUARIOS)
         if html is None:
             self.texto("Página no encontrada", "text/plain; charset=utf-8", sid, 404)
             return
@@ -83,12 +125,29 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
-        sid, ses = self.sesion()
         largo = int(self.headers.get("Content-Length", "0") or 0)
         form = parse_qs(self.rfile.read(largo).decode("utf-8"), keep_blank_values=True)
         data = unicos(form)
+        if parsed.path == "/login":
+            usuario = buscar_usuario(data.get("usuario", "").strip())
+            if not usuario or not clave_ok(usuario["clave"], data.get("clave", "")):
+                self.redirect("/login?e=1", "")
+                return
+            sid = f"{len(SESSIONS) + 1:x}{id(self):x}"
+            SESSIONS[sid] = {"usuario": usuario["usuario"], "rol": usuario["rol"], "store": Store()}
+            self.redirect(HOME[usuario["rol"]], sid)
+            return
+        sid = self.sid_cookie()
+        if parsed.path == "/salir":
+            SESSIONS.pop(sid, None)
+            self.redirect("/login", "")
+            return
+        if not sid:
+            self.redirect("/login", "")
+            return
+        ses = SESSIONS[sid]
         rol_ruta = zona_de(parsed.path)
-        if parsed.path != "/sesion" and rol_ruta and rol_ruta != ses["rol"]:
+        if rol_ruta and rol_ruta != ses["rol"]:
             self.redirect(HOME[ses["rol"]], sid)
             return
         destino = self.accion(ses, parsed.path, data, form)
@@ -96,11 +155,20 @@ class Handler(BaseHTTPRequestHandler):
 
     def accion(self, ses, path, data, form):
         store = ses["store"]
-        if path == "/sesion":
-            rol = data.get("rol", "")
-            if rol in HOME:
-                ses["rol"] = rol
-            return HOME[ses["rol"]]
+        if path == "/cd/usuario":
+            error = alta_usuario(data.get("usuario", ""), data.get("clave", ""), data.get("rol", ""))
+            if error:
+                store.form_error = error
+                return self.fallo(store, data, "/cd/usuarios")
+            store.notice = "Usuario creado."
+            return "/cd/usuarios"
+        if path == "/cd/usuario/baja":
+            error = baja_usuario(data.get("usuario", ""), ses["usuario"])
+            if error:
+                store.form_error = error
+                return self.fallo(store, data, "/cd/usuarios")
+            store.notice = "Usuario dado de baja."
+            return "/cd/usuarios"
         error = None
         volver = data.get("volver") or HOME[ses["rol"]]
         if path == "/cd/producto":
@@ -139,8 +207,8 @@ class Handler(BaseHTTPRequestHandler):
             error = store.guardar_categoria(data.get("nombre", ""), data.get("descripcion", ""))
             if error:
                 store.form_error = error
-                return self.fallo(store, data, "/cd/proveedores")
-            return "/cd/proveedores"
+                return self.fallo(store, data, "/cd/categorias")
+            return "/cd/categorias"
         if path == "/cd/sucursal":
             error = store.guardar_sucursal({
                 "codigo": data.get("codigo", ""),
@@ -283,15 +351,20 @@ class Handler(BaseHTTPRequestHandler):
     def redirect(self, destino, sid):
         self.send_response(303)
         self.send_header("Location", destino)
-        self.send_header("Set-Cookie", f"sid={sid}; Path=/; HttpOnly; SameSite=Lax")
+        if sid:
+            cookie = f"sid={sid}; Path=/; HttpOnly; SameSite=Lax"
+        else:
+            cookie = "sid=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
+        self.send_header("Set-Cookie", cookie)
         self.end_headers()
 
-    def texto(self, cuerpo, content_type, sid, status=200):
+    def texto(self, cuerpo, content_type, sid="", status=200):
         raw = cuerpo.encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(raw)))
-        self.send_header("Set-Cookie", f"sid={sid}; Path=/; HttpOnly; SameSite=Lax")
+        if sid:
+            self.send_header("Set-Cookie", f"sid={sid}; Path=/; HttpOnly; SameSite=Lax")
         self.end_headers()
         self.wfile.write(raw)
 

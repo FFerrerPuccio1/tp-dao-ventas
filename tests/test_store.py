@@ -1,7 +1,8 @@
 import unittest
 from datetime import datetime
 
-from ui.store import Store
+from ui.render import pagina
+from ui.store import Store, clave_ok, hash_clave
 
 
 class FlujoTest(unittest.TestCase):
@@ -58,6 +59,17 @@ class FlujoTest(unittest.TestCase):
             ],
         })
         self.assertIn("30", store.confirmar_devolucion("TCK-VIEJO", {"PROD-0063": 1}, "tarde"))
+
+    def test_pagina_y_clave(self):
+        corte, n, pages, total, ini = pagina(list(range(25)), {"p": "2"})
+        self.assertEqual(corte, list(range(10, 20)))
+        self.assertEqual((n, pages, total, ini), (2, 3, 25, 10))
+        corte, n, pages, total, ini = pagina(list(range(3)), {"p": "9"})
+        self.assertEqual(n, 1)
+        self.assertEqual(corte, [0, 1, 2])
+        guardada = hash_clave("cd")
+        self.assertTrue(clave_ok(guardada, "cd"))
+        self.assertFalse(clave_ok(guardada, "no"))
 
     def test_margen_descuenta_cmv_y_merma(self):
         store = Store()

@@ -1,5 +1,6 @@
 """Datos de la demo y las mutaciones del flujo. Se pierde al reiniciar el proceso."""
 
+import hashlib
 from datetime import datetime, timedelta
 
 # shortcut: mapa de estados en vez del patrón State, reemplazar cuando exista domain/
@@ -14,6 +15,14 @@ SIGUIENTE = {
 AHORA = datetime(2026, 10, 23, 15, 20, 0)
 LOCAL = "LOC-01"
 CD = "CD-01"
+
+
+def hash_clave(clave):
+    return hashlib.sha256(clave.encode()).hexdigest()
+
+
+def clave_ok(guardada, clave):
+    return guardada == hash_clave(clave)
 
 
 def _dt(hora, minuto, dia=23, segundo=0):

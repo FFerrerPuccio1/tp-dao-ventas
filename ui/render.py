@@ -1,5 +1,6 @@
 import html
 from datetime import datetime
+from urllib.parse import urlencode
 
 from ui.store import CD, LOCAL
 
@@ -65,6 +66,45 @@ def take_notice(store):
     return msg
 
 
+PAGE = 10
+SALTAR = {"p", "modal", "sku", "cuit", "keep", "ticket", "bulto", "codigo"}
+ROLES = (
+    ("ROL_OPERADOR_CD", "Operador CD"),
+    ("ROL_ENCARGADO_LOCAL", "Encargado LOC-01"),
+    ("ROL_ADMIN_GERENCIAL", "Gerencia"),
+)
+
+
+def rol_txt(rol):
+    return dict(ROLES).get(rol, rol)
+
+
+def pagina(filas, q, size=PAGE):
+    try:
+        n = int(q.get("p", "1") or 1)
+    except ValueError:
+        n = 1
+    total = len(filas)
+    pages = max(1, (total + size - 1) // size)
+    n = min(max(1, n), pages)
+    ini = (n - 1) * size
+    return filas[ini:ini + size], n, pages, total, ini
+
+
+def pager(path, q, n, pages, total, ini, size, etiqueta):
+    fin = min(ini + size, total) if total else 0
+    rango = f"Mostrando {ini + 1}–{fin} de {total} {etiqueta}" if total else f"Sin {etiqueta}"
+
+    def href(pag):
+        params = [(k, v) for k, v in q.items() if k not in SALTAR and v != ""]
+        params.append(("p", str(pag)))
+        return f"{path}?{urlencode(params)}"
+
+    prev = f'<a href="{href(n - 1)}">Anterior</a>' if n > 1 else "<span>Anterior</span>"
+    nxt = f'<a href="{href(n + 1)}">Siguiente</a>' if n < pages else "<span>Siguiente</span>"
+    return f'<div class="pager"><span>{rango}</span><span>{prev} · Página {n} de {pages} · {nxt}</span></div>'
+
+
 def shell(rol, active, crumb, ctx, body, modal=""):
     return f"""<!DOCTYPE html>
 <html lang="es">
@@ -93,9 +133,11 @@ def sidebar(rol, active):
         grupos = [
             ("ADMINISTRACIÓN Y ABASTECIMIENTO CD", [
                 ("/cd/catalogo", "package-search", 20, 20, "Catálogo y Precios"),
-                ("/cd/proveedores", "warehouse-nav", 20, 20, "Proveedores y Categorías"),
-                ("/cd/sucursales", "clipboard", 20, 20, "Sucursales y CD"),
+                ("/cd/proveedores", "warehouse-nav", 20, 20, "Proveedores"),
+                ("/cd/categorias", "clipboard", 20, 20, "Categorías"),
+                ("/cd/sucursales", "warehouse", 20, 20, "Sucursales y CD"),
                 ("/cd/stock", "barcode", 20, 20, "Stock por Ubicación y Mínimos"),
+                ("/cd/usuarios", "sliders", 18, 18, "Usuarios"),
             ]),
             ("LOGÍSTICA DE SALIDA (CD CENTRAL)", [
                 ("/cd/empaque", "package-check", 20, 20, "CD: Empaque y Precintado"),
@@ -127,19 +169,14 @@ def sidebar(rol, active):
         avatar, who, pill, pill_cls = "GR", "Auditoría y Gerencia", "Rol: Auditoría • Nodo: TODAS", "ger"
     nav = []
     for titulo, items in grupos:
-        nav.append(f'<p class="nav-label{" gap" if nav else ""}">{esc(titulo)}</p>')
+        abierto = " open" if any(href == active for href, *_ in items) else ""
+        links = []
         for href, nombre, w, h, label in items:
             cls = "active" if href == active else ""
-            nav.append(f'<a class="{cls}" href="{href}">{icon(nombre, w, h)}<span>{esc(label)}</span></a>')
-    opciones = [
-        ("ROL_OPERADOR_CD", "Operador CD"),
-        ("ROL_ENCARGADO_LOCAL", "Encargado LOC-01"),
-        ("ROL_ADMIN_GERENCIAL", "Gerencia"),
-    ]
-    opts = "".join(
-        f'<option value="{val}"{" selected" if val == rol else ""}>{esc(txt)}</option>'
-        for val, txt in opciones
-    )
+            links.append(f'<a class="{cls}" href="{href}">{icon(nombre, w, h)}<span>{esc(label)}</span></a>')
+        nav.append(
+            f'<details class="nav-group"{abierto}><summary><span>{esc(titulo)}</span>{icon("chevron", 16, 16)}</summary>{"".join(links)}</details>'
+        )
     av_cls = "local" if pill_cls == "local" else "ger" if pill_cls == "ger" else ""
     return f"""<aside class="sidebar">
   <div class="brand"><div class="mark">{icon("boxes", 23, 23)}</div><div><strong>LogiRetail ERP</strong><span>CD &amp; Sucursales</span></div></div>
@@ -149,13 +186,9 @@ def sidebar(rol, active):
     <div class="user">
       <div class="avatar {av_cls}">{esc(avatar)}</div>
       <div><p class="who">{esc(who)}</p><p class="sub">Sesión autorizada</p></div>
-      {icon("logout", 18, 18)}
+      <form method="post" action="/salir"><button class="icon-btn" type="submit" aria-label="Cerrar sesión">{icon("logout", 18, 18)}</button></form>
     </div>
     <div class="role-pill {pill_cls}">{icon("dot-blue", 6, 6)}<span>{esc(pill)}</span></div>
-    <form class="role-form" method="post" action="/sesion">
-      <select name="rol" aria-label="Cambiar rol">{opts}</select>
-      <button type="submit">Cambiar rol</button>
-    </form>
   </div>
 </aside>"""
 
@@ -170,7 +203,7 @@ def topbar(rol, crumb, ctx):
     else:
         caja = ""
         pill = f'<div class="ctx">{icon("warehouse", 18, 18)}<span>Operando en: Centro de Distribución Central</span>{icon("chevron", 16, 16)}</div>'
-    return f'<header class="topbar"><p class="crumb">{esc(crumb)}</p>{pill}{caja}{icon("bell", 18, 18)}</header>'
+    return f'<header class="topbar"><p class="crumb">{esc(crumb)}</p>{pill}{caja}</header>'
 
 
 def notice_html(store):
@@ -180,22 +213,32 @@ def notice_html(store):
     return f'<div class="banner ok">{esc(msg)}</div>'
 
 
-def tabs(actual):
-    items = [
-        ("/cd/catalogo", "Productos y Precios"),
-        ("/cd/stock", "Stock por Ubicación y Mínimos"),
-        ("/cd/proveedores", "Proveedores y Categorías"),
-        ("/cd/sucursales", "Sucursales y CD"),
-    ]
-    links = "".join(
-        f'<a class="{"on" if href == actual else ""}" href="{href}">{esc(label)}</a>'
-        for href, label in items
-    )
-    return f'<div class="tabs">{links}</div>'
+def head(title):
+    return f'<h1>{esc(title)}</h1>'
 
 
-def head(kicker, title, lead):
-    return f'<p class="kicker">{esc(kicker)}</p><h1>{esc(title)}</h1><p class="lead">{esc(lead)}</p>'
+def page_login(error=""):
+    err = f'<p class="err">{esc(error)}</p>' if error else ""
+    return f"""<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ingresar · LogiRetail ERP</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="login-body">
+<form class="login" method="post" action="/login">
+  <div class="brand"><div class="mark">{icon("boxes", 23, 23)}</div><div><strong>LogiRetail ERP</strong><span>CD &amp; Sucursales</span></div></div>
+  <h1>Ingresar</h1>
+  {err}
+  <div class="field"><label for="usuario">USUARIO</label><input id="usuario" name="usuario" autocomplete="username" required></div>
+  <div class="field"><label for="clave">CONTRASEÑA</label><input id="clave" name="clave" type="password" autocomplete="current-password" required></div>
+  <button class="btn primary block" type="submit">Entrar</button>
+</form>
+</body>
+</html>"""
 
 
 def overlay(inner, drawer=False):
@@ -213,10 +256,11 @@ def page_catalogo(rol, store, q):
     cat = q.get("cat", "")
     prov = q.get("prov", "")
     filas = store.filtrar_productos(texto, cat, prov)
+    corte, n, pages, total, ini = pagina(filas, q)
     cats = "".join(f'<option value="{esc(c["id"])}"{" selected" if c["id"] == cat else ""}>{esc(c["nombre"])}</option>' for c in store.categorias)
     provs = "".join(f'<option value="{esc(p["cuit"])}"{" selected" if p["cuit"] == prov else ""}>{esc(p["razon"])}</option>' for p in store.proveedores)
     body_rows = []
-    for p in filas:
+    for p in corte:
         body_rows.append(f"""<tr>
           <td class="mono">{esc(p["sku"])}</td>
           <td>{esc(p["barra"])}</td>
@@ -227,29 +271,24 @@ def page_catalogo(rol, store, q):
           <td class="mono right"><strong>{esc(money(p["precio"]))}</strong></td>
           <td><div class="actions"><a href="/cd/catalogo?modal=producto&sku={esc(p["sku"])}">{icon("pen", 18, 18)}</a><a href="/cd/catalogo?modal=producto&sku={esc(p["sku"])}">{icon("sliders", 18, 18)}</a></div></td>
         </tr>""")
-    n = len(filas)
     body = f"""{notice_html(store)}
-    {head("Administración de ubicaciones · Procesos 1 y 2", "Catálogo y abastecimiento CD", "Administrá productos, precios y proveedores. El ingreso de compras se registra en el CD Central.")}
-    {tabs("/cd/catalogo")}
+    {head("Catálogo y abastecimiento CD")}
     <form class="toolbar" method="get" action="/cd/catalogo">
       <label class="search">{icon("search", 16, 16)}<input name="q" value="{esc(texto)}" placeholder="Buscar por SKU, Código de Barras o Nombre..."></label>
       <label class="select"><select name="cat" onchange="this.form.submit()"><option value="">Todas las categorías</option>{cats}</select></label>
       <label class="select"><select name="prov" onchange="this.form.submit()"><option value="">Todos los proveedores</option>{provs}</select></label>
       <span class="grow"></span>
-      <a class="btn" href="/cd/proveedores?modal=proveedor">{icon("plus", 17, 17)} Nuevo Proveedor</a>
-      <button class="btn" type="submit">Filtrar</button>
       <a class="btn" href="/cd/catalogo?modal=compra">{icon("package-plus", 17, 17)} Registrar Compra/Ingreso en CD</a>
       <a class="btn primary" href="/cd/catalogo?modal=producto">{icon("plus", 17, 17)} Nuevo Producto</a>
     </form>
     <section class="card">
-      <div class="card-h"><h2>Productos registrados</h2><p>{n} productos · Precios en pesos argentinos</p></div>
+      <div class="card-h"><h2>Productos registrados</h2><p>{total} productos · Precios en pesos argentinos</p></div>
       <table>
         <thead><tr><th>SKU</th><th>CÓD. BARRAS</th><th>PRODUCTO</th><th>CATEGORÍA</th><th>PROVEEDOR HABITUAL</th><th class="right">COSTO UNIT.</th><th class="right">PRECIO VENTA</th><th>ACCIONES</th></tr></thead>
         <tbody>{''.join(body_rows)}</tbody>
       </table>
-      <div class="pager"><span>Mostrando 1–{n} de {n} productos</span><span>Página 1 de 1</span></div>
-    </section>
-    <p class="hint">{icon("sliders", 18, 18)} Configurá el stock mínimo por local desde cada producto. Los cambios de costo y precio quedan registrados.</p>"""
+      {pager("/cd/catalogo", q, n, pages, total, ini, PAGE, "productos")}
+    </section>"""
     return shell(rol, "/cd/catalogo", "Administración / Catálogo y abastecimiento", {}, body, modales_cd(store, q, "/cd/catalogo"))
 
 
@@ -269,39 +308,87 @@ def page_proveedores(rol, store, q):
           <td>{store.productos_de(prov["cuit"])} productos</td>
           <td>{badge("ACTIVO")}<a href="/cd/proveedores?modal=proveedor&cuit={esc(prov["cuit"])}"> Editar</a></td>
         </tr>""")
-    cats = []
-    for cat in store.categorias:
-        cats.append(f"""<div class="card" style="margin-bottom:12px;padding:12px">
-          <strong>{esc(cat["id"])} · {esc(cat["nombre"])}</strong>
-          <p class="note">{esc(cat["descripcion"])}</p>
-          <span class="tag">{store.productos_cat(cat["id"])} productos</span>
-        </div>""")
+    corte, n, pages, total, ini = pagina(cards, q)
     err = f'<div class="banner bad">{esc(store.form_error)}</div>' if store.form_error else ""
     body = f"""{notice_html(store)}{err}
-    {head("Administración de ubicaciones · Procesos 1 y 2", "Proveedores y categorías", "El CUIT identifica al proveedor y no se puede repetir.")}
-    {tabs("/cd/proveedores")}
-    <div class="split">
-      <section class="card">
-        <div class="card-h"><h2>Proveedores registrados ({len(store.proveedores)})</h2>
-          <form method="get" action="/cd/proveedores"><label class="search">{icon("search", 16, 16)}<input name="q" value="{esc(q.get("q", ""))}" placeholder="Buscar por CUIT o Razón Social..."></label></form>
-          <a class="btn primary" href="/cd/proveedores?modal=proveedor">{icon("plus", 17, 17)} Nuevo Proveedor</a>
-        </div>
-        <table>
-          <thead><tr><th>CUIT</th><th>RAZÓN SOCIAL</th><th>RUBRO</th><th>CONTACTO</th><th>PROD.</th><th>ESTADO</th></tr></thead>
-          <tbody>{''.join(cards)}</tbody>
-        </table>
-      </section>
-      <section>
-        <div class="card-h" style="padding-left:0"><h2>Categorías activas ({len(store.categorias)})</h2></div>
-        {''.join(cats)}
-        <form method="post" action="/cd/categoria" class="card" style="padding:12px">
-          <div class="field"><label>NUEVA CATEGORÍA</label><input name="nombre" required placeholder="Nombre"></div>
-          <div class="field"><label>DESCRIPCIÓN</label><input name="descripcion" placeholder="Descripción"></div>
-          <button class="btn" type="submit">+ Nueva Categoría</button>
-        </form>
-      </section>
-    </div>"""
-    return shell(rol, "/cd/proveedores", "Administración / Catálogo y abastecimiento", {}, body, modales_cd(store, q, "/cd/proveedores"))
+    {head("Proveedores")}
+    <section class="card">
+      <div class="card-h"><h2>Proveedores registrados ({len(store.proveedores)})</h2>
+        <form method="get" action="/cd/proveedores"><label class="search">{icon("search", 16, 16)}<input name="q" value="{esc(q.get("q", ""))}" placeholder="Buscar por CUIT o Razón Social..."></label></form>
+        <a class="btn primary" href="/cd/proveedores?modal=proveedor">{icon("plus", 17, 17)} Nuevo Proveedor</a>
+      </div>
+      <table>
+        <thead><tr><th>CUIT</th><th>RAZÓN SOCIAL</th><th>RUBRO</th><th>CONTACTO</th><th>PROD.</th><th>ESTADO</th></tr></thead>
+        <tbody>{''.join(corte)}</tbody>
+      </table>
+      {pager("/cd/proveedores", q, n, pages, total, ini, PAGE, "proveedores")}
+    </section>"""
+    return shell(rol, "/cd/proveedores", "Administración / Proveedores", {}, body, modales_cd(store, q, "/cd/proveedores"))
+
+
+def page_categorias(rol, store, q):
+    cards = []
+    for cat in store.categorias:
+        cards.append(f"""<tr>
+          <td class="mono">{esc(cat["id"])}</td>
+          <td><strong>{esc(cat["nombre"])}</strong></td>
+          <td>{esc(cat["descripcion"])}</td>
+          <td>{store.productos_cat(cat["id"])}</td>
+        </tr>""")
+    corte, n, pages, total, ini = pagina(cards, q)
+    err = f'<div class="banner bad">{esc(store.form_error)}</div>' if store.form_error else ""
+    body = f"""{notice_html(store)}{err}
+    {head("Categorías")}
+    <section class="card">
+      <div class="card-h"><h2>Categorías activas ({len(store.categorias)})</h2></div>
+      <table>
+        <thead><tr><th>CÓDIGO</th><th>NOMBRE</th><th>DESCRIPCIÓN</th><th>PRODUCTOS</th></tr></thead>
+        <tbody>{''.join(corte)}</tbody>
+      </table>
+      {pager("/cd/categorias", q, n, pages, total, ini, PAGE, "categorías")}
+    </section>
+    <form method="post" action="/cd/categoria" class="card" style="padding:16px">
+      <div class="field"><label for="cat-nombre">NOMBRE</label><input id="cat-nombre" name="nombre" required></div>
+      <div class="field"><label for="cat-desc">DESCRIPCIÓN</label><input id="cat-desc" name="descripcion"></div>
+      <button class="btn primary" type="submit">Nueva categoría</button>
+    </form>"""
+    return shell(rol, "/cd/categorias", "Administración / Categorías", {}, body)
+
+
+def page_usuarios(rol, store, q, usuario, usuarios):
+    filas = []
+    for u in usuarios:
+        if u["usuario"] == usuario:
+            accion = ""
+        else:
+            accion = f"""<form method="post" action="/cd/usuario/baja"><input type="hidden" name="usuario" value="{esc(u["usuario"])}"><button class="btn danger" type="submit">Baja</button></form>"""
+        filas.append(f"""<tr>
+          <td><strong>{esc(u["usuario"])}</strong></td>
+          <td>{esc(rol_txt(u["rol"]))}</td>
+          <td>{accion}</td>
+        </tr>""")
+    corte, n, pages, total, ini = pagina(filas, q)
+    opts = "".join(f'<option value="{val}">{esc(txt)}</option>' for val, txt in ROLES)
+    err = f'<div class="banner bad">{esc(store.form_error)}</div>' if store.form_error else ""
+    body = f"""{notice_html(store)}{err}
+    {head("Usuarios")}
+    <form method="post" action="/cd/usuario" class="card" style="padding:16px">
+      <div class="grid-2">
+        <div class="field"><label for="nuevo-usuario">USUARIO</label><input id="nuevo-usuario" name="usuario" autocomplete="off" required></div>
+        <div class="field"><label for="nueva-clave">CONTRASEÑA</label><input id="nueva-clave" name="clave" type="password" autocomplete="new-password" required></div>
+      </div>
+      <div class="field"><label for="nuevo-rol">ROL</label><select id="nuevo-rol" name="rol">{opts}</select></div>
+      <button class="btn primary" type="submit">Crear usuario</button>
+    </form>
+    <section class="card">
+      <div class="card-h"><h2>Usuarios ({len(usuarios)})</h2></div>
+      <table>
+        <thead><tr><th>USUARIO</th><th>ROL</th><th></th></tr></thead>
+        <tbody>{''.join(corte)}</tbody>
+      </table>
+      {pager("/cd/usuarios", q, n, pages, total, ini, PAGE, "usuarios")}
+    </section>"""
+    return shell(rol, "/cd/usuarios", "Administración / Usuarios", {}, body)
 
 
 def page_stock(rol, store, q):
@@ -322,15 +409,17 @@ def page_stock(rol, store, q):
           {''.join(celdas)}
           <td>{transito} u.</td>
           <td>{retenido} u.</td>
-          <td><a href="/cd/catalogo?modal=producto&sku={esc(p["sku"])}">Ajustar mínimos</a></td>
+          <td><a href="/cd/stock?modal=producto&sku={esc(p["sku"])}">Ajustar mínimos</a></td>
         </tr>""")
+    corte, n, pages, total, ini = pagina(rows, q)
     body = f"""{notice_html(store)}
-    {head("Administración de ubicaciones · Procesos 1 y 2", "Stock por ubicación y mínimos", "Disponible, en tránsito y retenido por precinto roto. El disponible del local es lo único vendible.")}
-    {tabs("/cd/stock")}
+    {head("Stock por ubicación y mínimos")}
     <section class="card"><table>
       <thead><tr><th>SKU / PRODUCTO</th><th>CD-01 DISP.</th><th>LOC-01</th><th>LOC-02</th><th>LOC-03</th><th>EN TRÁNSITO</th><th>RETENIDO</th><th></th></tr></thead>
-      <tbody>{''.join(rows)}</tbody>
-    </table></section>"""
+      <tbody>{''.join(corte)}</tbody>
+    </table>
+    {pager("/cd/stock", q, n, pages, total, ini, PAGE, "productos")}
+    </section>"""
     return shell(rol, "/cd/stock", "Administración / Stock", {}, body, modales_cd(store, q, "/cd/stock"))
 
 
@@ -355,11 +444,12 @@ def page_sucursales(rol, store, q, editable=True):
           <td>{miles(store.unidades_local(u["codigo"]))} u. ({esc(marca)})</td>
           <td>{badge("OPERATIVO")} {acciones}</td>
         </tr>""")
+    corte, n, pages, total, ini = pagina(rows, q)
     boton = f'<a class="btn primary" href="/cd/sucursales?modal=sucursal">{icon("plus", 17, 17)} Nueva Sucursal / Local</a>' if editable else ""
     editar_cd = '<a class="btn" href="/cd/sucursales?modal=cd">Editar Datos CD</a>' if editable else ""
+    lista = "/cd/sucursales" if editable else "/gerencia/red"
     body = f"""{notice_html(store)}
-    {head("Administración de ubicaciones · Proceso 1", "Red logística: Centro de Distribución y sucursales", "Administrá el nodo central de abastecimiento y los locales comerciales habilitados para operar.")}
-    {tabs("/cd/sucursales") if editable else ""}
+    {head("Red logística: Centro de Distribución y sucursales")}
     <div class="toolbar"><span class="grow"></span>{boton}</div>
     <section class="hub">
       <div class="meta">
@@ -374,8 +464,10 @@ def page_sucursales(rol, store, q, editable=True):
     </section>
     <section class="card"><table>
       <thead><tr><th>CÓDIGO</th><th>NOMBRE</th><th>TIPO</th><th>DIRECCIÓN</th><th>CAJA Y POS</th><th>STOCK VERIFICADO</th><th>ESTADO</th></tr></thead>
-      <tbody>{''.join(rows)}</tbody>
-    </table></section>"""
+      <tbody>{''.join(corte)}</tbody>
+    </table>
+    {pager(lista, q, n, pages, total, ini, PAGE, "sucursales")}
+    </section>"""
     active = "/gerencia/red" if not editable else "/cd/sucursales"
     crumb = "Gerencia / Red" if not editable else "Administración / Sucursales y CD"
     modal = modales_cd(store, q, "/cd/sucursales") if editable else ""
@@ -413,6 +505,7 @@ def page_empaque(rol, store, q):
               <td>{store.st(CD, it["sku"])["disp"]} u.</td><td>{it["qty"]}</td><td>{hecho}</td>
               <td class="{"bad" if queda else ""}">{queda}</td><td>{form}{esc(accion)}</td>
             </tr>""")
+        corte, n, pages, total, ini = pagina(pend, q)
         tarjetas = []
         for bulto in [b for b in store.bultos if b["orden"] == orden["nro"]]:
             items = "".join(
@@ -444,13 +537,14 @@ def page_empaque(rol, store, q):
         <div class="split-3">
           <section class="card"><div class="card-h"><h2>Mercadería pendiente de empaquetar</h2></div>
             <table><thead><tr><th>SKU</th><th>PRODUCTO</th><th>STOCK CD</th><th>PEDIDA</th><th>EMPAQUETADA</th><th>PENDIENTE</th><th></th></tr></thead>
-            <tbody>{''.join(pend)}</tbody></table>
+            <tbody>{''.join(corte)}</tbody></table>
+            {pager("/cd/empaque", q, n, pages, total, ini, PAGE, "líneas")}
           </section>
           <section><h2>Bultos del remito</h2>{''.join(tarjetas) or '<p class="note">Todavía no hay bultos.</p>'}</section>
         </div>"""
     err = f'<div class="banner bad">{esc(store.form_error)}</div>' if store.form_error else ""
     body = f"""{notice_html(store)}{err}
-    {head("Logística de salida · Proceso 4", "Empaque y precintado", "El bulto nace Preparado. Sin precinto no se puede despachar.")}
+    {head("Empaque y precintado")}
     {cuerpo}"""
     return shell(rol, "/cd/empaque", "Logística / Empaque y precintado", {}, body)
 
@@ -466,10 +560,11 @@ def page_despacho(rol, store, q):
         destino = next(r["destino"] for r in store.remitos if r["nro"] == bulto["remito"])
         unidades = sum(it["qty"] for it in bulto["items"])
         ultimo = bulto["historial"][-1]
+        traza = f'<a class="icon-btn" href="/cd/despacho?modal=traza&bulto={esc(bulto["codigo"])}" aria-label="Ver trazabilidad">{icon("clipboard", 18, 18)}</a>'
         if bulto["estado"] == "PRECINTADO":
-            accion = f"""<form method="post" action="/cd/despacho"><input type="hidden" name="bulto" value="{esc(bulto["codigo"])}"><button class="btn primary" type="submit">Registrar despacho</button></form>"""
+            accion = f"""<form method="post" action="/cd/despacho"><input type="hidden" name="bulto" value="{esc(bulto["codigo"])}"><button class="icon-btn" type="submit" aria-label="Registrar despacho">{icon("truck", 18, 18)}</button></form>"""
         elif bulto["estado"] == "PREPARADO":
-            accion = '<button class="btn" type="button" disabled>Falta precintar</button>'
+            accion = f'<button class="icon-btn" type="button" disabled aria-label="Falta precintar">{icon("truck", 18, 18)}</button>'
         else:
             accion = ""
         rows.append(f"""<tr>
@@ -480,11 +575,12 @@ def page_despacho(rol, store, q):
           <td>{unidades} u.</td>
           <td>{badge(bulto["estado"])}</td>
           <td>{esc(cuando(ultimo["fecha"]))}</td>
-          <td>{accion} <a href="/cd/despacho?modal=traza&bulto={esc(bulto["codigo"])}">Ver trazabilidad</a></td>
+          <td><div class="actions">{accion}{traza}</div></td>
         </tr>""")
+    corte, n, pages, total, ini = pagina(rows, q)
     err = f'<div class="banner bad">{esc(store.form_error)}</div>' if store.form_error else ""
     body = f"""{notice_html(store)}{err}
-    {head("Logística de salida · Proceso 5", "Despacho y trazabilidad", "Solo sale del CD un bulto precintado. El historial de estados no se edita.")}
+    {head("Despacho y trazabilidad")}
     <div class="kpis three">
       <div class="kpi"><span>Precintados listos</span><strong>{prec}</strong></div>
       <div class="kpi"><span>En tránsito</span><strong>{trans}</strong></div>
@@ -492,8 +588,10 @@ def page_despacho(rol, store, q):
     </div>
     <section class="card"><table>
       <thead><tr><th>BULTO</th><th>REMITO</th><th>ORIGEN → DESTINO</th><th>PRECINTO</th><th>UNIDADES</th><th>ESTADO</th><th>ÚLTIMO MOVIMIENTO</th><th>ACCIONES</th></tr></thead>
-      <tbody>{''.join(rows)}</tbody>
-    </table></section>"""
+      <tbody>{''.join(corte)}</tbody>
+    </table>
+    {pager("/cd/despacho", q, n, pages, total, ini, PAGE, "bultos")}
+    </section>"""
     modal = ""
     if q.get("modal") == "traza":
         bulto = store.bulto(q.get("bulto", ""))
@@ -503,10 +601,8 @@ def page_despacho(rol, store, q):
                 for h in bulto["historial"]
             )
             modal = overlay(f"""<aside class="drawer">
-              <div class="modal-h"><h2>{esc(bulto["codigo"])}</h2><a href="/cd/despacho">×</a></div>
-              <p class="subhead">Trazabilidad inmutable del bulto. Solo lectura.</p>
+              <div class="modal-h"><h2>{esc(bulto["codigo"])}</h2><a href="/cd/despacho" aria-label="Cerrar">×</a></div>
               <ul class="timeline">{items}</ul>
-              <p class="note">Registro de auditoría inmutable (solo lectura).</p>
             </aside>""", drawer=True)
     return shell(rol, "/cd/despacho", "Logística / Despacho", {}, body, modal)
 
@@ -525,14 +621,17 @@ def page_local_stock(rol, store, q):
           <td>{fila["transito"]} u.</td><td>{fila["cuarentena"]} u.</td><td>{fila["minimo"]} u.</td>
           <td>{max(fila["minimo"] - fila["disp"], 0)} u.</td>
         </tr>""")
+    corte, n, pages, total, ini = pagina(rows, q)
     toggle = "0" if solo else "1"
     body = f"""{notice_html(store)}
-    {head("Inventario del local · LOC-01", "Mi stock y faltantes", "El stock en tránsito o en cuarentena no se puede vender.")}
+    {head("Mi stock y faltantes")}
     <p><a class="btn" href="/local/stock?faltantes={toggle}">{"Ver todo el catálogo" if solo else "Mostrar solo bajo mínimo"}</a></p>
     <section class="card"><table>
       <thead><tr><th>SKU</th><th>PRODUCTO</th><th>DISPONIBLE</th><th>EN TRÁNSITO</th><th>CUARENTENA</th><th>MÍNIMO</th><th>SUGERIDO</th></tr></thead>
-      <tbody>{''.join(rows)}</tbody>
-    </table></section>"""
+      <tbody>{''.join(corte)}</tbody>
+    </table>
+    {pager("/local/stock", q, n, pages, total, ini, PAGE, "productos")}
+    </section>"""
     ctx = {"caja": money(store.ubicacion(LOCAL)["caja"])}
     return shell(rol, "/local/stock", "Local 01 / Stock", ctx, body)
 
@@ -552,6 +651,7 @@ def page_reposicion(rol, store, q):
           <td>{fila["transito"]} u.</td><td>{fila["minimo"]} u.</td><td>{sugerida} u.</td>
           <td><form method="post" action="/local/reposicion/agregar"><input type="hidden" name="sku" value="{esc(p["sku"])}"><button class="btn" type="submit">+ Agregar</button></form></td>
         </tr>""")
+    corte, n, pages, total, ini = pagina(rows, q)
     lineas = []
     unidades = 0
     for it in store.draft:
@@ -567,18 +667,18 @@ def page_reposicion(rol, store, q):
     toggle = "0" if solo else "1"
     ctx = {"caja": money(store.ubicacion(LOCAL)["caja"])}
     body = f"""{notice_html(store)}{err}
-    {head("Reposición · Proceso 3", "Solicitar reposición al CD", "Origen CD-01. Destino fijo: LOC-01 Sucursal Centro.")}
+    {head("Solicitar reposición al CD")}
     <div class="split">
       <section class="card">
         <div class="card-h"><h2>Estado de stock del local</h2>
           <a class="btn" href="/local/reposicion?faltantes={toggle}">{"Ver todo" if solo else "Solo bajo mínimo"}</a>
         </div>
         <table><thead><tr><th>SKU</th><th>PRODUCTO</th><th>DISPONIBLE</th><th>TRÁNSITO</th><th>MÍNIMO</th><th>SUGERIDA</th><th></th></tr></thead>
-        <tbody>{''.join(rows)}</tbody></table>
+        <tbody>{''.join(corte)}</tbody></table>
+        {pager("/local/reposicion", q, n, pages, total, ini, PAGE, "productos")}
       </section>
       <div class="order">
         <h2>Orden de reposición en curso</h2>
-        <p class="note">Desde CD Central hacia Local 01 - Centro · {esc(dia(datetime(2026, 10, 23)))}</p>
         {''.join(lineas) or '<p class="note">Todavía no agregaste productos.</p>'}
         <p>{len(store.draft)} productos · {unidades} u. en el borrador</p>
         <button class="btn primary block" type="submit" form="confirmar">Confirmar y enviar orden al CD</button>
@@ -605,6 +705,7 @@ def page_recepcion(rol, store, q):
           <td class="mono">{esc(bulto["codigo"])}</td><td class="mono">{esc(bulto["remito"])}</td>
           <td class="mono">{esc(bulto["precinto"] or "—")}</td><td>{badge(bulto["estado"])}</td><td>{accion}</td>
         </tr>""")
+    corte, n, pages, total, ini = pagina(rows, q)
     panel = ""
     elegido = store.bulto(foco) if foco else None
     if elegido and elegido["estado"] == "RECIBIDO":
@@ -622,14 +723,12 @@ def page_recepcion(rol, store, q):
             <form class="choice good on" method="post" action="/local/recepcion/verificar" style="margin-bottom:12px">
               <input type="hidden" name="bulto" value="{esc(elegido["codigo"])}">
               <strong>Precinto íntegro y coincidente</strong>
-              <p class="note">El precinto no presenta signos de violación y el contenido coincide.</p>
               <button class="btn green" type="submit">Confirmar VERIFICADO (+{unidades} u. a stock)</button>
             </form>
             <form class="choice bad on" method="post" action="/local/recepcion/rechazar">
               <input type="hidden" name="bulto" value="{esc(elegido["codigo"])}">
               <strong>Precinto violado, roto o adulterado</strong>
-              <p class="note">Bloquea el ingreso a stock vendible y registra la merma.</p>
-              <textarea name="motivo" required placeholder="Motivo del daño en el precinto"></textarea>
+              <div class="field"><label for="motivo">MOTIVO</label><textarea id="motivo" name="motivo" required></textarea></div>
               <button class="btn danger" type="submit">Declarar RECHAZADO</button>
             </form>
           </div>
@@ -637,11 +736,13 @@ def page_recepcion(rol, store, q):
     err = f'<div class="banner bad">{esc(store.form_error)}</div>' if store.form_error else ""
     ctx = {"caja": money(store.ubicacion(LOCAL)["caja"])}
     body = f"""{notice_html(store)}{err}
-    {head("Recepción · Proceso 6", "Recepción y control de precintos", "Hasta verificar el precinto, la mercadería no está disponible para la venta.")}
+    {head("Recepción y control de precintos")}
     <section class="card"><table>
       <thead><tr><th>BULTO</th><th>REMITO</th><th>PRECINTO</th><th>ESTADO</th><th></th></tr></thead>
-      <tbody>{''.join(rows)}</tbody>
-    </table></section>
+      <tbody>{''.join(corte)}</tbody>
+    </table>
+    {pager("/local/recepcion", q, n, pages, total, ini, PAGE, "bultos")}
+    </section>
     {panel}"""
     return shell(rol, "/local/recepcion", "Local 01 / Recepción", ctx, body)
 
@@ -649,21 +750,25 @@ def page_recepcion(rol, store, q):
 def page_pos(rol, store, q):
     texto = q.get("q", "").strip()
     medio = q.get("medio") or store.medio
-    hits = []
-    if texto:
-        hits = store.filtrar_productos(texto)[:5]
+    hits = store.filtrar_productos(texto)
     resultados = []
     for p in hits:
         fila = store.st(LOCAL, p["sku"])
-        resultados.append(f"""<form class="toolbar" method="post" action="/local/pos/agregar">
-          <input type="hidden" name="sku" value="{esc(p["sku"])}">
-          <input type="hidden" name="medio" value="{esc(medio)}">
-          <span><strong>{esc(p["sku"])}</strong> {esc(p["nombre"])} · {esc(money(p["precio"]))}</span>
-          <span class="ok">Stock verificado: {fila["disp"]} u.</span>
-          <span class="muted">En recepción sin verificar: {fila["cuarentena"]} u.</span>
-          <input class="qty" name="qty" type="number" min="1" value="1">
-          <button class="btn" type="submit">+ Agregar al ticket</button>
-        </form>""")
+        resultados.append(f"""<tr>
+          <td class="mono">{esc(p["sku"])}</td>
+          <td>{esc(p["nombre"])}</td>
+          <td class="mono">{esc(money(p["precio"]))}</td>
+          <td class="ok">{fila["disp"]} u.</td>
+          <td>
+            <form method="post" action="/local/pos/agregar">
+              <input type="hidden" name="sku" value="{esc(p["sku"])}">
+              <input type="hidden" name="medio" value="{esc(medio)}">
+              <input class="qty" name="qty" type="number" min="1" value="1" aria-label="Cantidad de {esc(p["nombre"])}">
+              <button class="btn" type="submit">Agregar</button>
+            </form>
+          </td>
+        </tr>""")
+    corte, n, pages, total, ini = pagina(resultados, q)
     carrito = []
     for it in store.cart:
         prod = store.producto(it["sku"])
@@ -697,15 +802,20 @@ def page_pos(rol, store, q):
     ctx = {"caja": money(store.ubicacion(LOCAL)["caja"])}
     unidades = sum(it["qty"] for it in store.cart)
     body = f"""{notice_html(store)}{err}
-    {head("Punto de venta · Proceso 7A", "Cobro y comprobante", "Solo se vende el stock disponible ya verificado de Local 01.")}
+    {head("Cobro y comprobante")}
     <div class="split">
       <section>
         <form class="toolbar" method="get" action="/local/pos">
           <input type="hidden" name="medio" value="{esc(medio)}">
-          <label class="search">{icon("search", 16, 16)}<input name="q" value="{esc(texto)}" placeholder="Escanear código de barras o buscar SKU / nombre..."></label>
-          <button class="btn" type="submit">Buscar</button>
+          <label class="search">{icon("search", 16, 16)}<input name="q" value="{esc(texto)}" placeholder="Escanear código de barras o buscar SKU / nombre..." aria-label="Buscar producto"></label>
         </form>
-        {''.join(resultados)}
+        <section class="card">
+          <table>
+            <thead><tr><th>SKU</th><th>PRODUCTO</th><th>PRECIO</th><th>STOCK</th><th>CANTIDAD</th></tr></thead>
+            <tbody>{''.join(corte) or '<tr><td colspan="5">Sin productos.</td></tr>'}</tbody>
+          </table>
+          {pager("/local/pos", q, n, pages, total, ini, PAGE, "productos")}
+        </section>
         <section class="card" style="margin-top:12px"><table>
           <thead><tr><th>SKU</th><th>DESCRIPCIÓN</th><th>PRECIO</th><th>CANTIDAD</th><th>SUBTOTAL</th><th></th></tr></thead>
           <tbody>{''.join(carrito) or '<tr><td colspan="6">El ticket está vacío.</td></tr>'}</tbody>
@@ -736,7 +846,6 @@ def page_pos(rol, store, q):
             <p class="total">{esc(money(venta["total"]))}</p>
             <p>Medio: {esc(venta["medio"])}</p>
             <p class="note">{esc(venta["ref"])}</p>
-            <p class="note">Stock descontado. Ingreso registrado en caja.</p>
             <div class="modal-f"><a class="btn primary" href="/local/pos">Nueva venta</a></div>""",
             "/local/pos",
             ticket=True,
@@ -775,14 +884,15 @@ def page_devoluciones(rol, store, q):
           <td>{esc(cuando(mov["fecha"]))}</td><td>{tipo}</td><td>{esc(mov["ref"])}</td>
           <td>{esc(mov["medio"])}</td><td class="{cls} mono">{esc(money(mov["monto"]))}</td>
         </tr>""")
+    corte, n, pages, total, ini = pagina(movs, q)
     err = f'<div class="banner bad">{esc(store.form_error)}</div>' if store.form_error else ""
     ctx = {"caja": money(store.ubicacion(LOCAL)["caja"])}
     body = f"""{notice_html(store)}{err}
-    {head("Caja del local · Proceso 7B", "Devoluciones y movimientos de caja", "Toda devolución tiene que corresponder a un comprobante de este local, dentro de los 30 días.")}
+    {head("Devoluciones y movimientos de caja")}
     <section class="card" style="padding:16px">
       <h2>Registrar devolución vinculada a un comprobante</h2>
       <form class="toolbar" method="post" action="/local/devolucion/buscar">
-        <input name="nro" value="{esc(store.venta_q)}" placeholder="TCK-LOC01-000451" required>
+        <label class="search">Comprobante <input name="nro" value="{esc(store.venta_q)}" required></label>
         <button class="btn" type="submit">Buscar venta</button>
       </form>
       {detalle}
@@ -790,15 +900,18 @@ def page_devoluciones(rol, store, q):
     <section class="card">
       <div class="card-h"><h2>Movimientos de caja · Local 01</h2><p>Saldo {esc(money(store.ubicacion(LOCAL)["caja"]))}</p></div>
       <table><thead><tr><th>FECHA</th><th>TIPO</th><th>REFERENCIA</th><th>MEDIO</th><th>MONTO</th></tr></thead>
-      <tbody>{''.join(movs)}</tbody></table>
+      <tbody>{''.join(corte)}</tbody></table>
+      {pager("/local/devoluciones", q, n, pages, total, ini, PAGE, "movimientos")}
     </section>"""
     return shell(rol, "/local/devoluciones", "Local 01 / Devoluciones", ctx, body)
 
 
 def _filtros(accion, q):
+    desde = q.get("desde", "2026-10-01T00:00")
+    hasta = q.get("hasta", "2026-10-23T23:59")
     return f"""<form class="toolbar" method="get" action="{accion}">
-      <label>Desde <input name="desde" value="{esc(q.get("desde", "01/10/2026"))}" placeholder="dd/mm/aaaa"></label>
-      <label>Hasta <input name="hasta" value="{esc(q.get("hasta", "23/10/2026"))}" placeholder="dd/mm/aaaa"></label>
+      <label>Desde <input type="datetime-local" name="desde" value="{esc(desde)}" required></label>
+      <label>Hasta <input type="datetime-local" name="hasta" value="{esc(hasta)}" required></label>
       <label>Ubicación <select name="ubi">
         <option value="">Todos los locales</option>
         <option value="LOC-01"{" selected" if q.get("ubi") == "LOC-01" else ""}>LOC-01</option>
@@ -806,7 +919,7 @@ def _filtros(accion, q):
         <option value="LOC-03"{" selected" if q.get("ubi") == "LOC-03" else ""}>LOC-03</option>
       </select></label>
       <button class="btn" type="submit">Actualizar reporte</button>
-      <a class="btn" href="{accion}.csv?desde={esc(q.get("desde", "01/10/2026"))}&hasta={esc(q.get("hasta", "23/10/2026"))}&ubi={esc(q.get("ubi", ""))}">Exportar CSV</a>
+      <a class="btn" href="{accion}.csv?desde={esc(desde)}&hasta={esc(hasta)}&ubi={esc(q.get("ubi", ""))}">Exportar CSV</a>
     </form>"""
 
 
@@ -824,6 +937,7 @@ def page_comercial(rol, store, q):
           <td class="mono">{esc(money(fila["ganancia"]))}</td>
           <td><div class="bar"><span style="width:{ancho}%"></span></div> {fila["margen"]:.1f}%</td>
         </tr>""")
+    corte, n, pages, total, ini = pagina(filas, q)
     cruce = []
     for local, medios in sorted(rep["cruce"].items()):
         cruce.append(f"""<tr><td>{esc(local)}</td>
@@ -831,7 +945,8 @@ def page_comercial(rol, store, q):
           <td class="mono">{esc(money(medios.get("debito", 0)))}</td>
           <td class="mono">{esc(money(medios.get("credito", 0)))}</td>
           <td class="mono">{esc(money(medios.get("qr", 0)))}</td></tr>""")
-    body = f"""{head("Gerencia · Reportes 1 y 2", "Reportes comerciales y de margen", "Ingresos netos de devoluciones, CMV y merma por precinto roto.")}
+    corte_c, nc, pages_c, total_c, ini_c = pagina(cruce, q)
+    body = f"""{head("Reportes comerciales y de margen")}
     {_filtros("/gerencia/comercial", q)}
     <div class="kpis">
       <div class="kpi"><span>Ingresos netos</span><strong>{esc(money(rep["ingresos"]))}</strong></div>
@@ -842,14 +957,15 @@ def page_comercial(rol, store, q):
     <div class="split">
       <section class="card"><div class="card-h"><h2>Más vendidos y margen</h2></div>
         <table><thead><tr><th>#</th><th>PRODUCTO</th><th>NETAS</th><th>INGRESOS</th><th>COSTO</th><th>MERMA</th><th>GANANCIA</th><th>%</th></tr></thead>
-        <tbody>{''.join(filas) or '<tr><td colspan="8">Sin ventas en el rango.</td></tr>'}</tbody></table>
+        <tbody>{''.join(corte) or '<tr><td colspan="8">Sin ventas en el rango.</td></tr>'}</tbody></table>
+        {pager("/gerencia/comercial", q, n, pages, total, ini, PAGE, "productos")}
       </section>
       <section class="card"><div class="card-h"><h2>Ventas por local y medio</h2></div>
         <table><thead><tr><th>LOCAL</th><th>EFECTIVO</th><th>DÉBITO</th><th>CRÉDITO</th><th>QR</th></tr></thead>
-        <tbody>{''.join(cruce) or '<tr><td colspan="5">Sin movimientos.</td></tr>'}</tbody></table>
+        <tbody>{''.join(corte_c) or '<tr><td colspan="5">Sin movimientos.</td></tr>'}</tbody></table>
+        {pager("/gerencia/comercial", q, nc, pages_c, total_c, ini_c, PAGE, "locales")}
       </section>
-    </div>
-    <p class="note">Valores netos de devoluciones registradas.</p>"""
+    </div>"""
     return shell(rol, "/gerencia/comercial", "Gerencia / Reportes comerciales", {}, body)
 
 
@@ -863,31 +979,37 @@ def page_logistica(rol, store, q):
         transito.append(f"""<tr><td>{esc(cod)}</td><td>{len(fila["mins"])}</td>
           <td>{_hm(min(fila["mins"]))}</td><td>{_hm(prom)}</td><td>{_hm(max(fila["mins"]))}</td>
           <td>{efect:.0f}%</td></tr>""")
+    corte_t, nt, pages_t, total_t, ini_t = pagina(transito, q)
     crit = []
     for fila in rep["criticos"]:
         crit.append(f"""<tr><td>{esc(fila["ubi"])}</td><td>{esc(fila["sku"])} {esc(fila["nombre"])}</td>
           <td class="bad">{fila["disp"]} u.</td><td>{fila["minimo"]} u.</td><td class="mono">{esc(money(fila["valor"]))}</td>
           <td>{badge("RECHAZADO").replace("RECHAZADO", "BAJO MÍNIMO")}</td></tr>""")
+    corte_k, nk, pages_k, total_k, ini_k = pagina(crit, q)
     malos = []
     for fila in rep["rechazados"]:
         malos.append(f"""<tr><td>{esc(cuando(fila["fecha"]))}</td><td class="mono">{esc(fila["codigo"])}</td>
           <td class="mono">{esc(fila["remito"])}</td><td>{esc(fila["destino"])}</td><td class="mono">{esc(fila["precinto"])}</td>
           <td>{fila["unidades"]}</td><td class="mono">{esc(money(fila["valor"]))}</td><td>{esc(fila["obs"])}</td></tr>""")
-    body = f"""{head("Gerencia · Reportes 3, 4 y 5", "Reportes logísticos y de inventario", "Tránsito, existencias bajo mínimo y bultos rechazados por precinto.")}
+    corte_m, nm, pages_m, total_m, ini_m = pagina(malos, q)
+    body = f"""{head("Reportes logísticos y de inventario")}
     {_filtros("/gerencia/logistica", q)}
     <div class="split">
       <section class="card"><div class="card-h"><h2>Tiempo de tránsito CD → local</h2></div>
         <table><thead><tr><th>DESTINO</th><th>RECIBIDOS</th><th>MÍN</th><th>PROMEDIO</th><th>MÁX</th><th>VERIFICADOS</th></tr></thead>
-        <tbody>{''.join(transito) or '<tr><td colspan="6">Sin arribos en el filtro.</td></tr>'}</tbody></table>
+        <tbody>{''.join(corte_t) or '<tr><td colspan="6">Sin arribos en el filtro.</td></tr>'}</tbody></table>
+        {pager("/gerencia/logistica", q, nt, pages_t, total_t, ini_t, PAGE, "destinos")}
       </section>
       <section class="card"><div class="card-h"><h2>Existencias en o bajo el mínimo</h2></div>
         <table><thead><tr><th>UBICACIÓN</th><th>PRODUCTO</th><th>DISP.</th><th>MÍNIMO</th><th>VALOR</th><th></th></tr></thead>
-        <tbody>{''.join(crit)}</tbody></table>
+        <tbody>{''.join(corte_k)}</tbody></table>
+        {pager("/gerencia/logistica", q, nk, pages_k, total_k, ini_k, PAGE, "productos")}
       </section>
     </div>
     <section class="card"><div class="card-h"><h2>Bultos rechazados por rotura de precinto</h2></div>
       <table><thead><tr><th>FECHA</th><th>BULTO</th><th>REMITO</th><th>DESTINO</th><th>PRECINTO</th><th>UNIDADES</th><th>PÉRDIDA</th><th>OBSERVACIÓN</th></tr></thead>
-      <tbody>{''.join(malos) or '<tr><td colspan="8">Sin rechazos.</td></tr>'}</tbody></table>
+      <tbody>{''.join(corte_m) or '<tr><td colspan="8">Sin rechazos.</td></tr>'}</tbody></table>
+      {pager("/gerencia/logistica", q, nm, pages_m, total_m, ini_m, PAGE, "bultos")}
     </section>"""
     return shell(rol, "/gerencia/logistica", "Gerencia / Reportes logísticos", {}, body)
 
@@ -900,14 +1022,11 @@ def _hm(mins):
 def _rango(q):
     def parse(valor, fin):
         try:
-            dt = datetime.strptime(valor, "%d/%m/%Y")
+            return datetime.strptime(valor, "%Y-%m-%dT%H:%M")
         except ValueError:
-            dt = datetime(2026, 10, 1 if not fin else 23)
-        if fin:
-            return dt.replace(hour=23, minute=59, second=59)
-        return dt
+            return datetime(2026, 10, 1) if not fin else datetime(2026, 10, 23, 23, 59)
 
-    return parse(q.get("desde", "01/10/2026"), False), parse(q.get("hasta", "23/10/2026"), True)
+    return parse(q.get("desde", "2026-10-01T00:00"), False), parse(q.get("hasta", "2026-10-23T23:59"), True)
 
 
 def modales_cd(store, q, volver):
@@ -1072,10 +1191,11 @@ def modal_cd(store, volver):
     return modal_box("Editar datos del CD", "CD-01 sigue siendo el único nodo de abastecimiento.", body, volver)
 
 
-def render(rol, store, path, q):
+def render(rol, store, path, q, usuario="", usuarios=None):
     ctx_pages = {
         "/cd/catalogo": page_catalogo,
         "/cd/proveedores": page_proveedores,
+        "/cd/categorias": page_categorias,
         "/cd/stock": page_stock,
         "/cd/sucursales": page_sucursales,
         "/cd/empaque": page_empaque,
@@ -1088,6 +1208,8 @@ def render(rol, store, path, q):
         "/gerencia/comercial": page_comercial,
         "/gerencia/logistica": page_logistica,
     }
+    if path == "/cd/usuarios":
+        return page_usuarios(rol, store, q, usuario, usuarios or [])
     if path == "/gerencia/red":
         return page_sucursales(rol, store, q, editable=False)
     fn = ctx_pages.get(path)
