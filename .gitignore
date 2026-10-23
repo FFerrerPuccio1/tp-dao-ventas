@@ -218,3 +218,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+
+# Graphify
+.graphify/
+graphify-out/
+graphify-out/*
